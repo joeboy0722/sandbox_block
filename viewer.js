@@ -53,8 +53,6 @@ document.addEventListener("DOMContentLoaded", () => {
 
   let currentTargetUrl = "";
   let pendingActionUrl = "";
-  // 併發請求佇列 (Interception Queue System)
-  const interceptionQueue = [];
 
   // 解析 URL 傳遞參數 (?url=...&mode=...)
   const urlParams = new URLSearchParams(window.location.search);
@@ -122,7 +120,14 @@ document.addEventListener("DOMContentLoaded", () => {
     securityBadge.classList.remove("disabled");
   }
 
-  // 將攔截請求推入佇列系統
+  // 併發請求佇列 (Interception Queue System) 與連環彈窗暴風雨防禦
+  const interceptionQueue = [];
+  const recentInterceptionTimestamps = [];
+  let burstSuppressionCount = 0;
+  let isStormModeActive = false;
+  let stormResetTimer = null;
+
+  // 將攔截請求推入佇列系統 (含連環暴風雨彈窗防禦)
   function triggerInterceptionToast(url, actionType) {
     let displayUrl = url;
     if (!displayUrl || displayUrl === "about:blank") {
@@ -133,16 +138,41 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     }
 
+    const now = Date.now();
+    // 清理超過 1.5 秒前的時間戳記
+    while (recentInterceptionTimestamps.length > 0 && now - recentInterceptionTimestamps[0] > 1500) {
+      recentInterceptionTimestamps.shift();
+    }
+    recentInterceptionTimestamps.push(now);
+
+    // 觸發背景攔截計數累加
+    chrome.runtime.sendMessage({ type: "INCREMENT_BLOCK_COUNT" });
+
+    // 若 1.5 秒內觸發請求數 > 3，自動進入暴風雨封鎖模式
+    if (recentInterceptionTimestamps.length > 3) {
+      isStormModeActive = true;
+      burstSuppressionCount++;
+
+      if (stormResetTimer) clearTimeout(stormResetTimer);
+      stormResetTimer = setTimeout(() => {
+        isStormModeActive = false;
+        burstSuppressionCount = 0;
+        processInterceptionQueue();
+      }, 2500);
+
+      // 直接靜音封鎖連環彈窗，不堆積佇列，僅更新提示標題
+      processInterceptionQueue();
+      return;
+    }
+
     // 防止完全重複的請求重複推入佇列洗版
     const isDuplicate = interceptionQueue.some(item => item.url === displayUrl && item.actionType === actionType);
     if (!isDuplicate) {
       interceptionQueue.push({
         url: displayUrl,
         actionType: actionType,
-        timestamp: Date.now()
+        timestamp: now
       });
-      // 觸發背景攔截計數累加
-      chrome.runtime.sendMessage({ type: "INCREMENT_BLOCK_COUNT" });
     }
 
     processInterceptionQueue();
@@ -150,14 +180,28 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // 處理與展現佇列頂部的攔截請求 UI
   function processInterceptionQueue() {
-    if (interceptionQueue.length === 0) {
+    if (interceptionQueue.length === 0 && !isStormModeActive) {
       toastBanner.classList.remove("show");
       if (toastCountBadge) toastCountBadge.style.display = "none";
+      if (btnToastDenyAll) btnToastDenyAll.style.display = "none";
+      return;
+    }
+
+    const toastTitleEl = document.querySelector(".toast-title span");
+
+    // 暴風雨連環彈窗防禦模式 UI 展現
+    if (isStormModeActive) {
+      if (toastTitleEl) {
+        toastTitleEl.textContent = `🛡️ 偵測到連環彈窗攻擊 (已自動批次封鎖 ${burstSuppressionCount} 個請求)`;
+      }
+      toastUrl.textContent = "多重跳轉/彈窗風暴已由沙盒自動攔截與批次靜音封鎖";
+      if (toastCountBadge) toastCountBadge.style.display = "none";
+      if (btnToastDenyAll) btnToastDenyAll.style.display = "inline-block";
+      toastBanner.classList.add("show");
       return;
     }
 
     const current = interceptionQueue[0];
-    const toastTitleEl = document.querySelector(".toast-title span");
     if (toastTitleEl) {
       if (current.actionType === "POPUP_WINDOW" || current.actionType === "LINK_BLANK") {
         toastTitleEl.textContent = "⚠️ 偵測到彈出視窗 (Popup) 請求";
@@ -169,6 +213,10 @@ document.addEventListener("DOMContentLoaded", () => {
     if (toastCountBadge) {
       toastCountBadge.textContent = `(${interceptionQueue.length} 個未處置)`;
       toastCountBadge.style.display = interceptionQueue.length > 1 ? "inline-block" : "none";
+    }
+
+    if (btnToastDenyAll) {
+      btnToastDenyAll.style.display = interceptionQueue.length > 1 ? "inline-block" : "none";
     }
 
     pendingActionUrl = current.url;
@@ -413,6 +461,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "SUBFRAME_NAVIGATION_ATTEMPT") {
     console.log("收到背景子框架導航攔截通知:", message.targetUrl);
     triggerInterceptionToast(message.targetUrl, "SUBFRAME_NAVIGATE");
+  } else if (message.type === "UPDATE_SANDBOX_URL") {
+    if (message.url) {
+      currentTargetUrl = message.url;
+      urlInput.value = message.url;
+    }
   }
 });
 
@@ -442,5 +495,15 @@ btnToastDeny.addEventListener("click", () => {
   interceptionQueue.shift();
   processInterceptionQueue();
 });
+
+if (btnToastDenyAll) {
+  btnToastDenyAll.addEventListener("click", () => {
+    interceptionQueue.length = 0;
+    isStormModeActive = false;
+    burstSuppressionCount = 0;
+    if (stormResetTimer) clearTimeout(stormResetTimer);
+    processInterceptionQueue();
+  });
+}
 
 });

@@ -29,32 +29,137 @@
   const realTop = window.top;
   const realParent = window.parent;
 
-  // 1. 隔離並保護 window.top 與 window.parent，防止沙盒內腳本篡改最外層 Viewport 視窗
+  // 1. 全方位隔離與保護 window.top 與 window.parent (含原型鏈與子 iframe 保護)
+  function applyWindowScopeProtection(targetWin) {
+    if (!targetWin) return;
+    try {
+      const windowProto = Object.getPrototypeOf(targetWin) || targetWin;
+      Object.defineProperty(targetWin, "top", {
+        get: function () { return targetWin; },
+        set: function () {},
+        configurable: false,
+        enumerable: true
+      });
+      Object.defineProperty(targetWin, "parent", {
+        get: function () { return targetWin; },
+        set: function () {},
+        configurable: false,
+        enumerable: true
+      });
+      if (windowProto && windowProto !== targetWin) {
+        try {
+          Object.defineProperty(windowProto, "top", {
+            get: function () { return this; },
+            configurable: false
+          });
+          Object.defineProperty(windowProto, "parent", {
+            get: function () { return this; },
+            configurable: false
+          });
+        } catch (e) {}
+      }
+    } catch (e) {}
+  }
+
+  applyWindowScopeProtection(window);
+
+  // 攔截 HTMLIFrameElement.prototype.contentWindow 存取，保護全新子框架視窗
   try {
-    const windowProto = Object.getPrototypeOf(window) || window;
-    const descTop = Object.getOwnPropertyDescriptor(windowProto, "top") || Object.getOwnPropertyDescriptor(window, "top");
-    if (!descTop || descTop.configurable !== false) {
-      Object.defineProperty(window, "top", {
-        get: function () { return window; },
-        configurable: true
+    const origContentWindowDesc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, "contentWindow");
+    if (origContentWindowDesc && origContentWindowDesc.get) {
+      Object.defineProperty(HTMLIFrameElement.prototype, "contentWindow", {
+        get: function () {
+          const childWin = origContentWindowDesc.get.call(this);
+          if (childWin) {
+            applyWindowScopeProtection(childWin);
+          }
+          return childWin;
+        },
+        configurable: true,
+        enumerable: true
       });
     }
   } catch (e) {}
 
+  // 攔截 Blob URL 與 srcdoc 注入逃逸嘗試
   try {
-    const windowProto = Object.getPrototypeOf(window) || window;
-    const descParent = Object.getOwnPropertyDescriptor(windowProto, "parent") || Object.getOwnPropertyDescriptor(window, "parent");
-    if (!descParent || descParent.configurable !== false) {
-      Object.defineProperty(window, "parent", {
-        get: function () { return window; },
-        configurable: true
+    const origCreateObjectURL = URL.createObjectURL;
+    if (origCreateObjectURL) {
+      URL.createObjectURL = function (blob) {
+        if (blob && blob.type && blob.type.toLowerCase().includes("html")) {
+          console.warn("🛡️ 沙盒防護：偵測到動態 HTML Blob 物件生成，已紀錄安全性警示");
+        }
+        return origCreateObjectURL.apply(this, arguments);
+      };
+    }
+
+    const origSrcdocDesc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, "srcdoc");
+    if (origSrcdocDesc && origSrcdocDesc.set) {
+      Object.defineProperty(HTMLIFrameElement.prototype, "srcdoc", {
+        get: function () { return origSrcdocDesc.get.call(this); },
+        set: function (val) {
+          console.warn("🛡️ 沙盒防禦：偵測到動態 srcdoc 寫入，實施子框架安全隔離");
+          return origSrcdocDesc.set.call(this, val);
+        },
+        configurable: true,
+        enumerable: true
       });
     }
   } catch (e) {}
 
-  // 發送訊息給外層 Viewer 視窗的通訊函式
+  // History API 限速 (防止 Back-Button Hijacking)
+  try {
+    let historyCallCount = 0;
+    let historyResetTimer = null;
+    const origPushState = history.pushState;
+    const origReplaceState = history.replaceState;
+
+    function checkHistoryRateLimit() {
+      historyCallCount++;
+      if (!historyResetTimer) {
+        historyResetTimer = setTimeout(() => {
+          historyCallCount = 0;
+          historyResetTimer = null;
+        }, 2000);
+      }
+      return historyCallCount <= 5;
+    }
+
+    if (origPushState) {
+      history.pushState = function () {
+        if (!checkHistoryRateLimit()) {
+          console.warn("🛡️ 沙盒防禦：阻斷高頻 history.pushState (歷史紀錄劫持防護)");
+          return;
+        }
+        return origPushState.apply(this, arguments);
+      };
+    }
+
+    if (origReplaceState) {
+      history.replaceState = function () {
+        if (!checkHistoryRateLimit()) {
+          console.warn("🛡️ 沙盒防禦：阻斷高頻 history.replaceState");
+          return;
+        }
+        return origReplaceState.apply(this, arguments);
+      };
+    }
+  } catch (e) {}
+
+  // 發送訊息給外層 Viewer 視窗的通訊函式 (含頻率節流防護)
+  let lastNotifyTime = 0;
+  let burstNotifyCount = 0;
+
   function notifyParent(actionType, targetUrl) {
     try {
+      const now = Date.now();
+      if (now - lastNotifyTime < 300) {
+        burstNotifyCount++;
+      } else {
+        burstNotifyCount = 0;
+      }
+      lastNotifyTime = now;
+
       let resolvedUrl = targetUrl;
       if (resolvedUrl && typeof resolvedUrl === "string") {
         if (resolvedUrl.startsWith("undefined") || resolvedUrl.includes("://undefined")) {
@@ -76,7 +181,8 @@
       (realTop || realParent || window).postMessage({
         type: "SANDBOX_INTERCEPTED_ACTION",
         actionType: actionType,
-        targetUrl: resolvedUrl
+        targetUrl: resolvedUrl,
+        burstCount: burstNotifyCount
       }, "*");
     } catch (e) {
       console.error("發送攔截通知失敗:", e);
@@ -234,6 +340,24 @@
         });
       }
     } catch (e) {}
+
+    // (D) Hook Document.prototype & HTMLDocument.prototype location (封鎖 document.location = "url")
+    [Document.prototype, HTMLDocument.prototype].forEach((docProto) => {
+      try {
+        const docLocDesc = Object.getOwnPropertyDescriptor(docProto, "location");
+        if (docLocDesc && docLocDesc.set) {
+          Object.defineProperty(docProto, "location", {
+            get: function () {
+              return docLocDesc.get ? docLocDesc.get.call(this) : document.location;
+            },
+            set: function (val) {
+              blockNavigation("DOCUMENT_LOCATION_SET", val);
+            },
+            configurable: true
+          });
+        }
+      } catch (e) {}
+    });
   } catch (e) {
     console.error("Hook Location 全屬性失敗:", e);
   }
@@ -269,15 +393,61 @@
     console.error("Hook HTMLElement.click 失敗:", e);
   }
 
+  // 5.5 全頁透明 Clickjacking 點擊誘捕動態偵測器
+  function detectClickjackingOverlay(event) {
+    try {
+      const el = event.target;
+      if (!el || el.tagName === "BODY" || el.tagName === "HTML") return;
+      const style = window.getComputedStyle(el);
+      const isFixed = style.position === "fixed" || style.position === "absolute";
+      const opacity = parseFloat(style.opacity || "1");
+      const isTransparent = opacity < 0.15 || style.backgroundColor === "rgba(0, 0, 0, 0)" || style.backgroundColor === "transparent";
+      const isFullScreen = el.offsetWidth >= window.innerWidth * 0.85 && el.offsetHeight >= window.innerHeight * 0.85;
+
+      if (isFixed && isTransparent && isFullScreen) {
+        console.warn("🛡️ 沙盒防禦：觸發全頁透明 Clickjacking 點擊誘捕遮罩！已紀錄事件並防範連帶彈窗", el);
+      }
+    } catch (e) {}
+  }
+
+  // 安全尋找事件目標相對應之 <a> 標籤 (相容 TextNode, SVG, Shadow DOM 與多層嵌套)
+  function getAnchorFromEventTarget(el) {
+    if (!el) return null;
+    const node = el.nodeType === Node.TEXT_NODE ? el.parentNode : el;
+    if (!node) return null;
+    if (typeof node.closest === "function") {
+      return node.closest("a");
+    }
+    let curr = node;
+    while (curr && curr.tagName !== "A" && curr.tagName !== "a") {
+      curr = curr.parentElement || curr.parentNode;
+    }
+    return (curr && (curr.tagName === "A" || curr.tagName === "a")) ? curr : null;
+  }
+
+  // 提前於 pointerdown / mousedown 捕獲階段鎖定 <a> 標籤，防止廣告腳本在按壓瞬時篡改 href
+  let lastCapturedAnchorUrl = "";
+  function captureAnchorOnPress(event) {
+    const anchor = getAnchorFromEventTarget(event.target);
+    if (anchor) {
+      const rawHref = anchor.getAttribute("href") || anchor.getAttribute("data-href") || anchor.getAttribute("data-url") || anchor.href;
+      if (rawHref && !rawHref.startsWith("#") && !rawHref.startsWith("javascript:")) {
+        lastCapturedAnchorUrl = rawHref;
+      }
+    }
+  }
+
+  ["pointerdown", "mousedown"].forEach((evtType) => {
+    document.addEventListener(evtType, captureAnchorOnPress, true);
+  });
+
   // 6. 攔截使用者手動點擊與腳本點擊事件 (<a href="..."> 連結)
   document.addEventListener("click", function (event) {
-    let target = event.target;
-    while (target && target.tagName !== "A") {
-      target = target.parentElement;
-    }
+    detectClickjackingOverlay(event);
 
-    if (target && target.tagName === "A") {
-      const href = target.getAttribute("href");
+    const target = getAnchorFromEventTarget(event.target);
+    if (target) {
+      const href = target.getAttribute("href") || target.getAttribute("data-href") || target.getAttribute("data-url") || target.href || lastCapturedAnchorUrl;
       const targetAttr = target.getAttribute("target");
 
       if (href && !href.startsWith("#") && !href.startsWith("javascript:")) {
@@ -285,8 +455,12 @@
         event.stopPropagation();
         if (event.stopImmediatePropagation) event.stopImmediatePropagation();
         
-        const actionType = targetAttr === "_blank" ? "LINK_BLANK" : "LINK_NAVIGATE";
+        let actionType = "LINK_NAVIGATE";
+        if (targetAttr === "_blank") actionType = "LINK_BLANK";
+        if (targetAttr === "_top" || targetAttr === "_parent") actionType = "LINK_TOP_ESCAPE";
+
         blockNavigation(actionType, href);
+        lastCapturedAnchorUrl = "";
       }
     }
   }, true);
@@ -299,7 +473,9 @@
       event.stopPropagation();
 
       const actionUrl = form.getAttribute("action") || window.location.href;
-      notifyParent("FORM_SUBMIT", actionUrl);
+      const targetAttr = form.getAttribute("target");
+      const actionType = (targetAttr === "_top" || targetAttr === "_parent") ? "FORM_TOP_ESCAPE" : "FORM_SUBMIT";
+      notifyParent(actionType, actionUrl);
     }
   }, true);
 

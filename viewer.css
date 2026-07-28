@@ -359,6 +359,17 @@ iframe#sandboxFrame {
   color: var(--text-muted);
 }
 
+.btn-toast-deny-all {
+  background: rgba(239, 68, 68, 0.2);
+  color: #fca5a5;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+}
+
+.btn-toast-deny-all:hover {
+  background: rgba(239, 68, 68, 0.8);
+  color: white;
+}
+
 /* 頂層最上層右鍵選單 (100% 懸浮於 Viewport 外層，絕不被沙盒內任何廣告擋住) */
 .viewer-context-menu {
   position: fixed !important;

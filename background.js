@@ -3,6 +3,47 @@
 // 記憶全域已授權子框架 URL 與單次普通開啟白名單
 const allowedSubframeUrls = new Set();
 const allowedDirectUrls = new Set();
+let nextDnrRuleId = 2000;
+
+// 動態新增 DNR 網絡層阻斷規則
+async function blockSubframeUrlDnr(url) {
+  try {
+    const ruleId = nextDnrRuleId++;
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      addRules: [{
+        id: ruleId,
+        priority: 50,
+        action: { type: "block" },
+        condition: {
+          urlFilter: url,
+          resourceTypes: ["sub_frame"]
+        }
+      }]
+    });
+  } catch (e) {
+    console.error("DNR 阻斷規則新增失敗:", e);
+  }
+}
+
+// 動態新增 DNR 網絡層放行規則
+async function allowSubframeUrlDnr(url) {
+  try {
+    const ruleId = nextDnrRuleId++;
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      addRules: [{
+        id: ruleId,
+        priority: 100,
+        action: { type: "allow" },
+        condition: {
+          urlFilter: url,
+          resourceTypes: ["sub_frame"]
+        }
+      }]
+    });
+  } catch (e) {
+    console.error("DNR 放行規則新增失敗:", e);
+  }
+}
 
 // 初始化動態 Header 解封規則 (移除 X-Frame-Options 與 CSP 防護標頭)
 async function updateFrameHeaderRules() {
@@ -91,13 +132,41 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
     try {
       const tab = await chrome.tabs.get(details.tabId);
       if (tab && tab.url && tab.url.startsWith(viewerUrl)) {
-        // 如果該 URL 已被使用者授權過，放行
-        if (allowedSubframeUrls.has(url)) return;
+        // 解析目前沙盒主頁面的 hostname
+        let mainHost = "";
+        try {
+          const tabUrlObj = new URL(tab.url);
+          const rawInnerUrl = tabUrlObj.searchParams.get("url");
+          if (rawInnerUrl) mainHost = new URL(rawInnerUrl).hostname;
+        } catch (e) {}
+
+        let navHost = "";
+        try {
+          navHost = new URL(url).hostname;
+        } catch (e) {}
+
+        // 如果是同網域 (Same-origin) 跳轉，屬正常瀏覽操作，直接放行並同步更新網址列
+        if (mainHost && navHost && mainHost === navHost) {
+          chrome.tabs.sendMessage(details.tabId, {
+            type: "UPDATE_SANDBOX_URL",
+            url: url
+          });
+          return;
+        }
+
+        // 如果該 URL 或網域已被使用者授權過，放行
+        if (allowedSubframeUrls.has(url) || (navHost && allowedSubframeUrls.has(navHost))) {
+          return;
+        }
+
+        // 跨網域/未授權跳轉：立即加入 DNR 阻斷規則並發送 Toast 詢問
+        await blockSubframeUrlDnr(url);
 
         // 發送訊息給 Viewer 視窗彈出跳轉詢問 Toast
         chrome.tabs.sendMessage(details.tabId, {
           type: "SUBFRAME_NAVIGATION_ATTEMPT",
-          targetUrl: url
+          targetUrl: url,
+          frameId: details.frameId
         });
       }
     } catch (e) {
@@ -116,6 +185,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   } else if (message.type === "ALLOW_SUBFRAME_URL") {
     if (message.url) {
       allowedSubframeUrls.add(message.url);
+      allowSubframeUrlDnr(message.url);
     }
   } else if (message.type === "ALLOW_DIRECT_ONCE") {
     if (message.url) {
