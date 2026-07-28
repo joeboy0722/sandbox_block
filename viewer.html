@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>沙盒虛擬瀏覽器 (沙盒)</title>
+  <link id="viewerFavicon" rel="icon" type="image/png" href="icon.png">
+  <link rel="stylesheet" href="viewer.css">
+</head>
+<body>
+
+  <!-- 頂部控制工具列 -->
+  <header class="navbar">
+    <div class="nav-buttons">
+      <button id="btnBack" class="nav-btn" title="後退">◀</button>
+      <button id="btnForward" class="nav-btn" title="前進">▶</button>
+      <button id="btnReload" class="nav-btn" title="重新整理">🔄</button>
+    </div>
+
+    <div class="url-bar-container">
+      <span class="url-icon">🔒</span>
+      <input type="text" id="urlInput" class="url-input" placeholder="輸入網址或搜尋內容..." />
+    </div>
+
+    <div id="securityBadge" class="security-badge">
+      <span>🛡️ 沙盒防護中 (100% 封鎖彈窗)</span>
+    </div>
+  </header>
+
+  <!-- 主要視窗與沙盒 iframe -->
+  <main class="viewport-container">
+
+    <!-- 沙盒 iframe (預設移除 allow-popups，鎖死彈窗) -->
+    <iframe 
+      id="sandboxFrame" 
+      sandbox="allow-scripts allow-forms allow-same-origin">
+    </iframe>
+
+    <!-- 網頁開啟前詢問對話框 (Prompt Overlay) -->
+    <div id="promptOverlay" class="prompt-overlay">
+      <div class="prompt-card">
+        <div class="prompt-icon">🛡️</div>
+        <h2 class="prompt-title">即將前往外部網頁</h2>
+        <p class="prompt-subtitle">請選擇要以何種模式開啟該網站：</p>
+        
+        <div id="targetUrlBox" class="target-url-box">https://example.com</div>
+
+        <div class="prompt-actions">
+          <button id="btnOpenSandbox" class="btn-primary">
+            <span>🛡️ 以沙盒安全防護開啟 (推薦)</span>
+          </button>
+          <button id="btnOpenDirect" class="btn-secondary">
+            <span>🌐 以普通網頁開啟</span>
+          </button>
+        </div>
+
+        <label class="remember-option">
+          <input type="checkbox" id="chkRemember">
+          <span>記住對此網站的選擇 (可於控制台修改)</span>
+        </label>
+      </div>
+    </div>
+
+    <!-- 沙盒內彈窗/跳轉動作二次確認橫幅 (Action Interception Toast) -->
+    <div id="toastBanner" class="toast-banner">
+      <div class="toast-info">
+        <div class="toast-title">
+          <span>⚠️ 偵測到跳轉/彈窗請求</span>
+        </div>
+        <div id="toastUrl" class="toast-url">https://target-ad.com</div>
+      </div>
+      <div class="toast-actions">
+        <button id="btnToastAllow" class="btn-sm btn-toast-allow">🛡️ 沙盒內繼續</button>
+        <button id="btnToastTab" class="btn-sm btn-toast-tab">🌐 新分頁開啟</button>
+        <button id="btnToastDeny" class="btn-sm btn-toast-deny">🚫 拒絕攔截</button>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- 頂層外層右鍵選單 (永遠懸浮於沙盒 iframe 與所有廣告最上層) -->
+  <div id="viewerContextMenu" class="viewer-context-menu"></div>
+
+  <script src="viewer.js"></script>
+</body>
+</html>
