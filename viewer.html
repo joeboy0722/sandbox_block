@@ -25,15 +25,27 @@
     <div id="securityBadge" class="security-badge">
       <span>🛡️ 沙盒防護中 (100% 封鎖彈窗)</span>
     </div>
+
+    <!-- 內容提取工具按鈕群 -->
+    <div class="extractor-tools">
+      <button id="btnPickerMode" class="extractor-btn" title="🎯 滑鼠點擊選取網頁物件提取內容">
+        <span>🎯 點選提取</span>
+      </button>
+      <button id="btnToggleDrawer" class="extractor-btn accent" title="📦 查看沙盒自動提取的多媒體資源庫">
+        <span>📦 內容提取</span>
+        <span id="mediaCountBadge" class="media-badge">0</span>
+      </button>
+    </div>
   </header>
 
   <!-- 主要視窗與沙盒 iframe -->
   <main class="viewport-container">
 
-    <!-- 沙盒 iframe (預設移除 allow-popups，鎖死彈窗) -->
+    <!-- 沙盒 iframe (預設移除 allow-popups 鎖死彈窗，解封影音與簡報權限) -->
     <iframe 
       id="sandboxFrame" 
-      sandbox="allow-scripts allow-forms allow-same-origin">
+      allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
+      sandbox="allow-scripts allow-forms allow-same-origin allow-presentation allow-modals allow-downloads">
     </iframe>
 
     <!-- 網頁開啟前詢問對話框 (Prompt Overlay) -->
@@ -74,6 +86,60 @@
         <button id="btnToastTab" class="btn-sm btn-toast-tab">🌐 新分頁開啟</button>
         <button id="btnToastDeny" class="btn-sm btn-toast-deny">🚫 拒絕單一</button>
         <button id="btnToastDenyAll" class="btn-sm btn-toast-deny-all" style="display:none;">🚫 一鍵全部拒絕</button>
+      </div>
+    </div>
+
+    <!-- 多媒體內容提取抽屜面板 (Content Extractor Drawer) -->
+    <div id="extractorDrawer" class="extractor-drawer">
+      <div class="drawer-header">
+        <div class="drawer-title">
+          <span>📦 沙盒多媒體提取庫</span>
+        </div>
+        <div class="drawer-actions">
+          <button id="btnClearMedia" class="drawer-icon-btn" title="清空資源列表">🗑️ 清空</button>
+          <button id="btnCloseDrawer" class="drawer-icon-btn" title="關閉面板">✖</button>
+        </div>
+      </div>
+
+      <!-- 媒體類型頁籤切換 -->
+      <div class="media-tabs">
+        <button class="tab-btn active" data-tab="all">全部 (<span id="countAll">0</span>)</button>
+        <button class="tab-btn" data-tab="video">🎥 影片 (<span id="countVideo">0</span>)</button>
+        <button class="tab-btn" data-tab="audio">🎵 音訊 (<span id="countAudio">0</span>)</button>
+        <button class="tab-btn" data-tab="image">🖼️ 圖片 (<span id="countImage">0</span>)</button>
+        <button class="tab-btn" data-tab="file">📄 檔案 (<span id="countFile">0</span>)</button>
+      </div>
+
+      <!-- 資源清單 -->
+      <div id="mediaList" class="media-list">
+        <div class="empty-media-tip">
+          <div class="empty-icon">🔍</div>
+          <p>沙盒中尚未偵測到多媒體內容</p>
+          <span class="empty-sub">可點擊頂部「🎯 點選提取」直接點選網頁畫面提取影片或圖片</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 點擊選取物件提取詳情對話框 (Picker Detail Modal) -->
+    <div id="pickerDetailModal" class="picker-modal">
+      <div class="picker-modal-card">
+        <div class="picker-modal-header">
+          <div id="pickerModalIcon" class="picker-modal-icon">🎯</div>
+          <h3 id="pickerModalTitle" class="picker-modal-title">已提取物件內容</h3>
+          <button id="btnClosePickerModal" class="drawer-icon-btn">✖</button>
+        </div>
+        <div id="pickerModalPreview" class="picker-modal-preview"></div>
+        <div class="picker-modal-info">
+          <label>標籤類型：<span id="pickerTagType">VIDEO</span></label>
+          <div class="picker-url-box">
+            <input type="text" id="pickerUrlInput" readonly value="https://..." />
+            <button id="btnCopyPickerUrl" class="btn-sm btn-toast-tab">📋 複製</button>
+          </div>
+        </div>
+        <div class="picker-modal-actions">
+          <button id="btnOpenPickerUrl" class="btn-primary">🌐 在新頁籤開啟</button>
+          <button id="btnDownloadPickerUrl" class="btn-secondary">⬇️ 下載媒體</button>
+        </div>
       </div>
     </div>
 

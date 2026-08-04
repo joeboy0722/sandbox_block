@@ -3,12 +3,21 @@
 // 記憶全域已授權子框架 URL 與單次普通開啟白名單
 const allowedSubframeUrls = new Set();
 const allowedDirectUrls = new Set();
-let nextDnrRuleId = 2000;
+// 取得不重複的動態 DNR 規則 ID
+async function getUniqueDnrRuleId() {
+  try {
+    const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
+    const maxId = existingRules.reduce((max, r) => Math.max(max, r.id), 2000);
+    return maxId + 1;
+  } catch (e) {
+    return Math.floor(Date.now() % 100000) + 2000;
+  }
+}
 
 // 動態新增 DNR 網絡層阻斷規則
 async function blockSubframeUrlDnr(url) {
   try {
-    const ruleId = nextDnrRuleId++;
+    const ruleId = await getUniqueDnrRuleId();
     await chrome.declarativeNetRequest.updateDynamicRules({
       addRules: [{
         id: ruleId,
@@ -28,7 +37,7 @@ async function blockSubframeUrlDnr(url) {
 // 動態新增 DNR 網絡層放行規則
 async function allowSubframeUrlDnr(url) {
   try {
-    const ruleId = nextDnrRuleId++;
+    const ruleId = await getUniqueDnrRuleId();
     await chrome.declarativeNetRequest.updateDynamicRules({
       addRules: [{
         id: ruleId,
@@ -45,23 +54,27 @@ async function allowSubframeUrlDnr(url) {
   }
 }
 
-// 初始化動態 Header 解封規則 (移除 X-Frame-Options 與 CSP 防護標頭)
+// 初始化動態 Header 解封規則 (徹底抹除 X-Frame-Options 與 CSP 防嵌入標頭)
 async function updateFrameHeaderRules() {
   try {
     const rules = [
       {
         id: 1,
-        priority: 1,
+        priority: 1000,
         action: {
           type: "modifyHeaders",
           responseHeaders: [
             { header: "x-frame-options", operation: "remove" },
+            { header: "X-Frame-Options", operation: "remove" },
             { header: "content-security-policy", operation: "remove" },
-            { header: "frame-options", operation: "remove" }
+            { header: "Content-Security-Policy", operation: "remove" },
+            { header: "frame-options", operation: "remove" },
+            { header: "Frame-Options", operation: "remove" }
           ]
         },
         condition: {
-          resourceTypes: ["sub_frame"]
+          urlFilter: "*",
+          resourceTypes: ["sub_frame", "main_frame", "xmlhttprequest", "other"]
         }
       }
     ];
@@ -70,7 +83,7 @@ async function updateFrameHeaderRules() {
       removeRuleIds: [1],
       addRules: rules
     });
-    console.log("沙盒標頭解封動態規則更新成功");
+    console.log("🛡️ 沙盒標頭解封動態規則 (High Priority 1000) 更新成功");
   } catch (error) {
     console.error("更新動態 Header 規則失敗:", error);
   }

@@ -25,6 +25,20 @@
   window.__SANDBOX_BRIDGE_INITIALIZED__ = true;
   console.log("🛡️ 沙盒內部雙重防護與全方位跳轉 Bridge 已成功注入！");
 
+  // 安全防止 PresentationRequest (Chromecast/Cast SDK) 在沙盒內拋出 Uncaught SecurityError 影響畫面渲染
+  if (typeof window.PresentationRequest === "undefined") {
+    try {
+      window.PresentationRequest = function () {
+        return {
+          start: function () { return Promise.reject(new Error("PresentationNotSupported")); },
+          reconnect: function () { return Promise.reject(new Error("PresentationNotSupported")); },
+          addEventListener: function () {},
+          removeEventListener: function () {}
+        };
+      };
+    } catch (e) {}
+  }
+
   // 保存真實頂層與父視窗引用，用於安全的 postMessage 通訊
   const realTop = window.top;
   const realParent = window.parent;
@@ -150,6 +164,8 @@
   let lastNotifyTime = 0;
   let burstNotifyCount = 0;
 
+  let lastPickerCapturedUrl = "";
+
   function notifyParent(actionType, targetUrl) {
     try {
       const now = Date.now();
@@ -176,6 +192,13 @@
       }
       
       console.warn(`⚠️ 沙盒攔截到動作 [${actionType}]:`, resolvedUrl);
+
+      // 🎯 若當前為「點選提取」模式，靜音封鎖彈窗提醒，並將該跳轉位址記錄給提取探針使用
+      if (isPickerActive) {
+        lastPickerCapturedUrl = resolvedUrl;
+        console.log("🎯 選取提取模式中：已靜音封鎖廣告彈窗提示，並捕捉目標鏈結:", resolvedUrl);
+        return;
+      }
 
       // 透過保存的 realTop 向外層 Viewport (viewer.js) 發送廣播
       (realTop || realParent || window).postMessage({
@@ -461,6 +484,10 @@
 
         blockNavigation(actionType, href);
         lastCapturedAnchorUrl = "";
+
+        if (isPickerActive) {
+          triggerPickerExtractionOnBlockedTarget(event.target);
+        }
       }
     }
   }, true);
@@ -1037,9 +1064,405 @@
           } catch (e) {}
         });
       }
+    } else if (data.type === "TOGGLE_ELEMENT_PICKER") {
+      toggleElementPicker(data.enabled);
     }
   });
 
+  // =========================================================================
+  // 3. 沙盒多媒體與內容自動偵測器 (Sandbox Media Sniffer)
+  // =========================================================================
+  const discoveredMediaMap = new Map();
+  let mediaNotifyTimer = null;
+
+  function addDiscoveredMedia(url, type, tag, title) {
+    if (!url || typeof url !== "string") return;
+    if (url.startsWith("data:image/svg+xml") || url.startsWith("javascript:")) return;
+    
+    let absoluteUrl = url;
+    try {
+      absoluteUrl = new URL(url, window.location.href).href;
+    } catch (e) {}
+
+    // 自動清理廣告與極小圖示 (除非特定多媒體格式)
+    if (discoveredMediaMap.has(absoluteUrl)) return;
+
+    discoveredMediaMap.set(absoluteUrl, {
+      url: absoluteUrl,
+      type: type, // 'video' | 'audio' | 'image' | 'file'
+      tag: tag || type.toUpperCase(),
+      title: title || absoluteUrl.split("/").pop().split("?")[0] || "媒體資源"
+    });
+
+    scheduleMediaReport();
+  }
+
+  function scheduleMediaReport() {
+    if (mediaNotifyTimer) return;
+    mediaNotifyTimer = setTimeout(() => {
+      mediaNotifyTimer = null;
+      try {
+        const mediaList = Array.from(discoveredMediaMap.values());
+        (realTop || realParent || window).postMessage({
+          type: "SANDBOX_DISCOVERED_MEDIA",
+          mediaList: mediaList
+        }, "*");
+      } catch (e) {}
+    }, 500);
+  }
+
+  // 判斷網址媒體類型
+  function getMediaTypeFromUrl(url) {
+    if (!url) return null;
+    const lower = url.toLowerCase();
+    if (/\.(mp4|m3u8|webm|mkv|flv|mov|avi)(\?|$)/.test(lower)) return "video";
+    if (/\.(mp3|m4a|aac|ogg|wav|flac)(\?|$)/.test(lower)) return "audio";
+    if (/\.(jpg|jpeg|png|gif|webp|svg|bmp)(\?|$)/.test(lower)) return "image";
+    if (/\.(pdf|zip|rar|7z|apk|exe|doc|docx)(\?|$)/.test(lower)) return "file";
+    return null;
+  }
+
+  // DOM 媒體掃描器
+  function scanDomMedia() {
+    try {
+      // 1. 影片 <video>, <source>
+      const videos = document.querySelectorAll("video, video source");
+      videos.forEach((el) => {
+        const src = el.src || el.currentSrc || el.getAttribute("src");
+        if (src) addDiscoveredMedia(src, "video", "VIDEO", el.title || el.alt);
+      });
+
+      // 2. 音訊 <audio>, <audio source>
+      const audios = document.querySelectorAll("audio, audio source");
+      audios.forEach((el) => {
+        const src = el.src || el.currentSrc || el.getAttribute("src");
+        if (src) addDiscoveredMedia(src, "audio", "AUDIO", el.title || el.alt);
+      });
+
+      // 3. 圖片 <img>
+      const images = document.querySelectorAll("img");
+      images.forEach((img) => {
+        const src = img.src || img.getAttribute("src");
+        // 排除極小 icon / spacer
+        if (src && (img.naturalWidth > 50 || img.naturalHeight > 50 || !img.complete)) {
+          addDiscoveredMedia(src, "image", "IMAGE", img.alt || img.title);
+        }
+      });
+
+      // 4. 檔案與媒體導向連結 <a>
+      const anchors = document.querySelectorAll("a[href]");
+      anchors.forEach((a) => {
+        const href = a.href;
+        const mediaType = getMediaTypeFromUrl(href);
+        if (mediaType) {
+          addDiscoveredMedia(href, mediaType, mediaType.toUpperCase(), a.innerText.trim() || "下載檔案");
+        }
+      });
+      // 5. 內嵌影音框架 <iframe>
+      const iframes = document.querySelectorAll("iframe");
+      iframes.forEach((frame) => {
+        const src = frame.src || frame.getAttribute("src");
+        if (src && (src.includes("player") || src.includes("embed") || src.includes("video") || src.includes("watch") || src.includes("v."))) {
+          addDiscoveredMedia(src, "video", "IFRAME_PLAYER", frame.title || "內嵌影片播放頁");
+        }
+      });
+    } catch (e) {}
+  }
+
+  // Hook Fetch 與 XHR 網路請求
+  try {
+    const origFetch = window.fetch;
+    if (origFetch) {
+      window.fetch = function () {
+        const args = arguments;
+        const url = (typeof args[0] === "string") ? args[0] : (args[0] && args[0].url ? args[0].url : "");
+        const mediaType = getMediaTypeFromUrl(url);
+        if (mediaType) {
+          addDiscoveredMedia(url, mediaType, "STREAM", "網絡串流資源");
+        }
+        return origFetch.apply(this, args);
+      };
+    }
+
+    const origXHROpen = XMLHttpRequest.prototype.open;
+    if (origXHROpen) {
+      XMLHttpRequest.prototype.open = function (method, url) {
+        if (typeof url === "string") {
+          const mediaType = getMediaTypeFromUrl(url);
+          if (mediaType) {
+            addDiscoveredMedia(url, mediaType, "XHR", "動態加載媒體");
+          }
+        }
+        return origXHROpen.apply(this, arguments);
+      };
+    }
+  } catch (e) {}
+
+  // 監聽 DOM 動態加載
+  if (document.readyState === "complete" || document.readyState === "interactive") {
+    scanDomMedia();
+  } else {
+    document.addEventListener("DOMContentLoaded", scanDomMedia);
+  }
+
+  const mediaObserver = new MutationObserver(() => {
+    scanDomMedia();
+  });
+
+  if (document.body) {
+    mediaObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["src", "srcset"] });
+  }
+
+  // =========================================================================
+  // 4. 點擊選取物件探針 (Visual Inspector & Object Picker)
+  // =========================================================================
+  let isPickerActive = false;
+  let pickerHighlightBox = null;
+
+  function createPickerHighlightBox() {
+    if (pickerHighlightBox) return;
+    pickerHighlightBox = document.createElement("div");
+    pickerHighlightBox.id = "__SANDBOX_PICKER_HIGHLIGHT__";
+    pickerHighlightBox.style.cssText = `
+      position: fixed !important;
+      pointer-events: none !important;
+      z-index: 2147483647 !important;
+      border: 2px dashed #3b82f6 !important;
+      background: rgba(59, 130, 246, 0.2) !important;
+      box-shadow: 0 0 15px rgba(59, 130, 246, 0.6) !important;
+      transition: all 0.05s ease !important;
+      display: none !important;
+      border-radius: 4px !important;
+    `;
+
+    const label = document.createElement("span");
+    label.id = "__SANDBOX_PICKER_LABEL__";
+    label.style.cssText = `
+      position: absolute !important;
+      top: -26px !important;
+      left: 0 !important;
+      background: #3b82f6 !important;
+      color: #ffffff !important;
+      font-size: 11px !important;
+      font-weight: bold !important;
+      font-family: sans-serif !important;
+      padding: 2px 6px !important;
+      border-radius: 4px !important;
+      white-space: nowrap !important;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.5) !important;
+    `;
+    pickerHighlightBox.appendChild(label);
+    (document.body || document.documentElement).appendChild(pickerHighlightBox);
+  }
+
+  function handlePickerPreventDefault(e) {
+    if (!isPickerActive) return;
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
+  function toggleElementPicker(enabled) {
+    isPickerActive = !!enabled;
+    if (isPickerActive) {
+      lastPickerCapturedUrl = "";
+      createPickerHighlightBox();
+      document.addEventListener("mouseover", handlePickerMouseOver, true);
+      document.addEventListener("click", handlePickerClick, true);
+      document.addEventListener("mousedown", handlePickerPreventDefault, true);
+      document.addEventListener("pointerdown", handlePickerPreventDefault, true);
+      document.addEventListener("mouseup", handlePickerPreventDefault, true);
+      console.log("🎯 沙盒點擊選取探針已啟動 (自動靜音廣告彈窗)");
+    } else {
+      if (pickerHighlightBox) pickerHighlightBox.style.display = "none";
+      document.removeEventListener("mouseover", handlePickerMouseOver, true);
+      document.removeEventListener("click", handlePickerClick, true);
+      document.removeEventListener("mousedown", handlePickerPreventDefault, true);
+      document.removeEventListener("pointerdown", handlePickerPreventDefault, true);
+      document.removeEventListener("mouseup", handlePickerPreventDefault, true);
+      console.log("🎯 沙盒點擊選取探針已關閉");
+    }
+
+    // 遞迴廣播給子框架一同開啟/關閉選取探針
+    try {
+      const childIframes = document.querySelectorAll("iframe");
+      childIframes.forEach((frame) => {
+        if (frame.contentWindow) {
+          frame.contentWindow.postMessage({
+            type: "TOGGLE_ELEMENT_PICKER",
+            enabled: enabled
+          }, "*");
+        }
+      });
+    } catch (e) {}
+  }
+
+  function handlePickerMouseOver(e) {
+    if (!isPickerActive || !pickerHighlightBox) return;
+    const target = e.target;
+    if (target === pickerHighlightBox || pickerHighlightBox.contains(target)) return;
+
+    const rect = target.getBoundingClientRect();
+    pickerHighlightBox.style.left = rect.left + "px";
+    pickerHighlightBox.style.top = rect.top + "px";
+    pickerHighlightBox.style.width = rect.width + "px";
+    pickerHighlightBox.style.height = rect.height + "px";
+    pickerHighlightBox.style.display = "block";
+
+    const label = document.getElementById("__SANDBOX_PICKER_LABEL__");
+    if (label) {
+      const tagName = target.tagName.toLowerCase();
+      label.textContent = `<${tagName}> ${Math.round(rect.width)}x${Math.round(rect.height)} (點擊提取內容)`;
+    }
+  }
+
+  function triggerPickerExtractionOnBlockedTarget(targetEl) {
+    if (!isPickerActive) return;
+    toggleElementPicker(false); // 提取後結束選取模式
+    let extractedMedia = extractMediaFromElement(targetEl);
+    (realTop || realParent || window).postMessage({
+      type: "SANDBOX_ELEMENT_PICKED",
+      payload: extractedMedia
+    }, "*");
+  }
+
+  function handlePickerClick(e) {
+    if (!isPickerActive) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    const target = e.target;
+    triggerPickerExtractionOnBlockedTarget(target);
+  }
+
+  function extractMediaFromElement(el) {
+    if (!el) return null;
+
+    // 0. 若點擊廣告或按鈕時捕捉到了跳轉位址，優先提取該目標網址與廣告內的圖片
+    if (lastPickerCapturedUrl) {
+      const capturedUrl = lastPickerCapturedUrl;
+      lastPickerCapturedUrl = "";
+
+      const imgEl = el.tagName === "IMG" ? el : (el.querySelector("img") || el.closest("img"));
+      const imgSrc = imgEl ? imgEl.src : "";
+
+      return {
+        type: imgSrc ? "image" : (getMediaTypeFromUrl(capturedUrl) || "file"),
+        tag: "AD_TARGET",
+        url: capturedUrl,
+        imgSrc: imgSrc,
+        title: "廣告跳轉目標網址"
+      };
+    }
+
+    // A. 優先檢查全頁面正在播放或具備 src 的 <video> 元素
+    const activeVideo = Array.from(document.querySelectorAll("video")).find(v => (v.src || v.currentSrc) && (!v.paused || v.currentTime > 0));
+    if (activeVideo && (el.contains(activeVideo) || el.closest(".video-js, [class*='player'], [id*='player']") || el.tagName === "VIDEO")) {
+      const src = activeVideo.currentSrc || activeVideo.src || (activeVideo.querySelector("source") ? activeVideo.querySelector("source").src : "");
+      if (src) {
+        return {
+          type: "video",
+          tag: "VIDEO_ACTIVE",
+          url: src,
+          poster: activeVideo.poster || "",
+          width: activeVideo.videoWidth || activeVideo.clientWidth,
+          height: activeVideo.videoHeight || activeVideo.clientHeight
+        };
+      }
+    }
+
+    // B. 向下或向上搜尋 <video>
+    const videoContainer = el.tagName === "VIDEO" ? el : (el.querySelector("video") || el.closest("video, .video-js, [class*='player'], [id*='player']"));
+    if (videoContainer) {
+      const videoEl = videoContainer.tagName === "VIDEO" ? videoContainer : videoContainer.querySelector("video");
+      if (videoEl) {
+        const src = videoEl.currentSrc || videoEl.src || (videoEl.querySelector("source") ? videoEl.querySelector("source").src : "");
+        if (src) {
+          return {
+            type: "video",
+            tag: "VIDEO",
+            url: src,
+            poster: videoEl.poster || "",
+            width: videoEl.videoWidth || videoEl.clientWidth,
+            height: videoEl.videoHeight || videoEl.clientHeight
+          };
+        }
+      }
+    }
+
+    // C. 檢查 <iframe> 或包含 <iframe> 的容器 (影音嵌入頁)
+    const iframeEl = el.tagName === "IFRAME" ? el : (el.querySelector("iframe") || el.closest("iframe"));
+    if (iframeEl && iframeEl.src) {
+      return {
+        type: "video",
+        tag: "IFRAME_PLAYER",
+        url: iframeEl.src,
+        title: iframeEl.title || "內嵌影片播放頁"
+      };
+    }
+
+    // D. 搜尋 <audio>
+    const audioEl = el.tagName === "AUDIO" ? el : (el.querySelector("audio") || el.closest("audio"));
+    if (audioEl) {
+      const src = audioEl.currentSrc || audioEl.src || (audioEl.querySelector("source") ? audio.querySelector("source").src : "");
+      if (src) {
+        return {
+          type: "audio",
+          tag: "AUDIO",
+          url: src
+        };
+      }
+    }
+
+    // E. 搜尋 <img>
+    const imgEl = el.tagName === "IMG" ? el : (el.querySelector("img") || el.closest("img"));
+    if (imgEl && imgEl.src) {
+      return {
+        type: "image",
+        tag: "IMAGE",
+        url: imgEl.src,
+        width: imgEl.naturalWidth || imgEl.clientWidth,
+        height: imgEl.naturalHeight || imgEl.clientHeight
+      };
+    }
+
+    // F. 背景圖片 (background-image)
+    try {
+      const bgImg = window.getComputedStyle(el).backgroundImage;
+      if (bgImg && bgImg !== "none" && bgImg.includes("url(")) {
+        const match = bgImg.match(/url\((['"]?)(.*?)\1\)/);
+        if (match && match[2]) {
+          return {
+            type: "image",
+            tag: "BACKGROUND_IMAGE",
+            url: match[2]
+          };
+        }
+      }
+    } catch (e) {}
+
+    // G. 連結 <a>
+    const anchor = el.tagName === "A" ? el : el.closest("a");
+    if (anchor && anchor.href) {
+      const mediaType = getMediaTypeFromUrl(anchor.href) || "file";
+      return {
+        type: mediaType,
+        tag: "LINK",
+        url: anchor.href,
+        title: anchor.innerText.trim() || anchor.href
+      };
+    }
+
+    // H. 一般文字/容器內容提取 fallback
+    return {
+      type: "file",
+      tag: el.tagName.toUpperCase(),
+      url: window.location.href,
+      text: el.innerText ? el.innerText.trim().slice(0, 300) : "",
+      html: el.outerHTML ? el.outerHTML.slice(0, 500) : ""
+    };
+  }
+
 })();
+
 
 

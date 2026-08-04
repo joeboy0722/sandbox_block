@@ -6,14 +6,21 @@ document.addEventListener("DOMContentLoaded", () => {
     "navbar", "urlInput", "btnBack", "btnForward", "btnReload", "securityBadge",
     "viewport-container", "sandboxFrame", "promptOverlay", "toastBanner", "viewerContextMenu",
     "targetUrlBox", "btnOpenSandbox", "btnOpenDirect", "chkRemember", "toastUrl",
-    "btnToastAllow", "btnToastTab", "btnToastDeny", "nav-buttons", "url-bar-container"
+    "btnToastAllow", "btnToastTab", "btnToastDeny", "nav-buttons", "url-bar-container",
+    "extractor-tools", "btnPickerMode", "btnToggleDrawer", "mediaCountBadge", "extractorDrawer",
+    "mediaList", "pickerDetailModal", "btnClearMedia", "btnCloseDrawer", "countAll", "countVideo",
+    "countAudio", "countImage", "countFile", "pickerModalIcon", "pickerModalTitle", "btnClosePickerModal",
+    "pickerModalPreview", "pickerTagType", "pickerUrlInput", "btnCopyPickerUrl", "btnOpenPickerUrl",
+    "btnDownloadPickerUrl", "picker-modal-card"
   ]);
 
   const viewportEscapeGuard = new MutationObserver((mutations) => {
     mutations.forEach((mutation) => {
       mutation.addedNodes.forEach((node) => {
         if (node.nodeType === Node.ELEMENT_NODE) {
-          const isAllowed = allowedViewerElements.has(node.id) ||
+          const isInsideAllowedParent = !!(node.closest && node.closest("#extractorDrawer, #pickerDetailModal, #viewerContextMenu, .navbar, .viewport-container, #toastBanner, #promptOverlay"));
+          const isAllowed = isInsideAllowedParent ||
+            allowedViewerElements.has(node.id) ||
             allowedViewerElements.has(node.className) ||
             node.tagName === "SCRIPT" || node.tagName === "LINK" ||
             (node.parentElement && allowedViewerElements.has(node.parentElement.id));
@@ -27,7 +34,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   if (document.body) {
-    viewportEscapeGuard.observe(document.body, { childList: true, subtree: false });
+    viewportEscapeGuard.observe(document.body, { childList: true, subtree: true });
   }
 
   // DOM 元素引用
@@ -294,8 +301,270 @@ window.addEventListener("message", (event) => {
     renderTopViewerContextMenu(data);
   } else if (data.type === "UPDATE_VIEWER_METADATA") {
     updateViewerTabTitleAndFavicon(data.title, data.faviconUrl);
+  } else if (data.type === "SANDBOX_DISCOVERED_MEDIA") {
+    if (Array.isArray(data.mediaList)) {
+      handleDiscoveredMediaList(data.mediaList);
+    }
+  } else if (data.type === "SANDBOX_ELEMENT_PICKED") {
+    if (data.payload) {
+      showPickerDetailModal(data.payload);
+    }
   }
 });
+
+// =========================================================================
+// 10. 沙盒多媒體資源提取器 (Media Extractor) 與點選探針 (Element Picker) 控制 logic
+// =========================================================================
+
+const btnPickerMode = document.getElementById("btnPickerMode");
+const btnToggleDrawer = document.getElementById("btnToggleDrawer");
+const mediaCountBadge = document.getElementById("mediaCountBadge");
+const extractorDrawer = document.getElementById("extractorDrawer");
+const btnClearMedia = document.getElementById("btnClearMedia");
+const btnCloseDrawer = document.getElementById("btnCloseDrawer");
+const mediaListContainer = document.getElementById("mediaList");
+
+const countAllEl = document.getElementById("countAll");
+const countVideoEl = document.getElementById("countVideo");
+const countAudioEl = document.getElementById("countAudio");
+const countImageEl = document.getElementById("countImage");
+const countFileEl = document.getElementById("countFile");
+
+const pickerDetailModal = document.getElementById("pickerDetailModal");
+const btnClosePickerModal = document.getElementById("btnClosePickerModal");
+const pickerModalTitle = document.getElementById("pickerModalTitle");
+const pickerModalPreview = document.getElementById("pickerModalPreview");
+const pickerTagType = document.getElementById("pickerTagType");
+const pickerUrlInput = document.getElementById("pickerUrlInput");
+const btnCopyPickerUrl = document.getElementById("btnCopyPickerUrl");
+const btnOpenPickerUrl = document.getElementById("btnOpenPickerUrl");
+const btnDownloadPickerUrl = document.getElementById("btnDownloadPickerUrl");
+
+let isPickerActive = false;
+let currentActiveTab = "all";
+let discoveredMediaMap = new Map();
+
+// A. 點擊選取模式開關
+btnPickerMode.addEventListener("click", () => {
+  setPickerActiveState(!isPickerActive);
+});
+
+function setPickerActiveState(active) {
+  isPickerActive = !!active;
+  if (isPickerActive) {
+    btnPickerMode.classList.add("active");
+    btnPickerMode.querySelector("span").textContent = "🎯 點選中(按ESC取消)";
+  } else {
+    btnPickerMode.classList.remove("active");
+    btnPickerMode.querySelector("span").textContent = "🎯 點選提取";
+  }
+
+  // 發送導引通知給沙盒內部的 Bridge
+  if (sandboxFrame && sandboxFrame.contentWindow) {
+    try {
+      sandboxFrame.contentWindow.postMessage({
+        type: "TOGGLE_ELEMENT_PICKER",
+        enabled: isPickerActive
+      }, "*");
+    } catch (e) {}
+  }
+}
+
+// 按下 ESC 鍵取消選取模式
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && isPickerActive) {
+    setPickerActiveState(false);
+  }
+});
+
+// B. 抽屜式面板開關
+btnToggleDrawer.addEventListener("click", () => {
+  const isOpen = extractorDrawer.classList.toggle("open");
+  console.log("📦 點擊內容提取按鈕，面板開啟狀態:", isOpen);
+  if (isOpen) {
+    renderMediaList();
+  }
+});
+
+btnCloseDrawer.addEventListener("click", () => {
+  extractorDrawer.classList.remove("open");
+});
+
+btnClearMedia.addEventListener("click", () => {
+  discoveredMediaMap.clear();
+  renderMediaList();
+});
+
+// C. 媒體類別 Tab 切換
+const tabBtns = document.querySelectorAll(".media-tabs .tab-btn");
+tabBtns.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    tabBtns.forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    currentActiveTab = btn.getAttribute("data-tab");
+    renderMediaList();
+  });
+});
+
+// D. 處理自動偵測到的媒體清單
+function handleDiscoveredMediaList(newList) {
+  newList.forEach((item) => {
+    if (item && item.url && !discoveredMediaMap.has(item.url)) {
+      discoveredMediaMap.set(item.url, item);
+    }
+  });
+  renderMediaList();
+}
+
+// 繪製與分類媒體卡片
+function renderMediaList() {
+  const allItems = Array.from(discoveredMediaMap.values());
+  
+  // 更新計數
+  const videoList = allItems.filter(i => i.type === "video");
+  const audioList = allItems.filter(i => i.type === "audio");
+  const imageList = allItems.filter(i => i.type === "image");
+  const fileList = allItems.filter(i => i.type === "file" || !["video", "audio", "image"].includes(i.type));
+
+  countAllEl.textContent = allItems.length;
+  countVideoEl.textContent = videoList.length;
+  countAudioEl.textContent = audioList.length;
+  countImageEl.textContent = imageList.length;
+  countFileEl.textContent = fileList.length;
+  mediaCountBadge.textContent = allItems.length;
+
+  let displayItems = allItems;
+  if (currentActiveTab === "video") displayItems = videoList;
+  else if (currentActiveTab === "audio") displayItems = audioList;
+  else if (currentActiveTab === "image") displayItems = imageList;
+  else if (currentActiveTab === "file") displayItems = fileList;
+
+  mediaListContainer.innerHTML = "";
+
+  if (displayItems.length === 0) {
+    mediaListContainer.innerHTML = `
+      <div class="empty-media-tip">
+        <div class="empty-icon">🔍</div>
+        <p>此類別中尚無提取到的多媒體內容</p>
+        <span class="empty-sub">可點擊頂部「🎯 點選提取」直接點選網頁畫面提取影片或圖片</span>
+      </div>
+    `;
+    return;
+  }
+
+  displayItems.forEach((item) => {
+    const card = document.createElement("div");
+    card.className = "media-card";
+
+    let previewHtml = "";
+    if (item.type === "image") {
+      previewHtml = `<div class="media-preview-box"><img src="${item.url}" loading="lazy" alt="預覽圖" /></div>`;
+    } else if (item.type === "video") {
+      previewHtml = `<div class="media-preview-box"><video src="${item.url}" controls preload="metadata"></video></div>`;
+    }
+
+    card.innerHTML = `
+      <div class="media-card-header">
+        <span class="media-tag tag-${item.type}">${item.tag || item.type}</span>
+      </div>
+      <div class="media-url" title="${item.url}">${item.url}</div>
+      ${previewHtml}
+      <div class="media-card-actions">
+        <button class="btn-sm btn-toast-tab btn-copy-url">📋 複製</button>
+        <button class="btn-sm btn-toast-allow btn-open-url">🌐 開啟</button>
+        <button class="btn-sm btn-toast-deny btn-download-url">⬇️ 下載</button>
+      </div>
+    `;
+
+    // 複製事件
+    card.querySelector(".btn-copy-url").addEventListener("click", () => {
+      navigator.clipboard.writeText(item.url);
+      const btn = card.querySelector(".btn-copy-url");
+      btn.textContent = "✅ 已複製";
+      setTimeout(() => btn.textContent = "📋 複製", 1500);
+    });
+
+    // 開啟事件
+    card.querySelector(".btn-open-url").addEventListener("click", () => {
+      chrome.runtime.sendMessage({ type: "ALLOW_DIRECT_ONCE", url: item.url }, () => {
+        window.open(item.url, "_blank");
+      });
+    });
+
+    // 下載事件
+    card.querySelector(".btn-download-url").addEventListener("click", () => {
+      triggerDownload(item.url);
+    });
+
+    mediaListContainer.appendChild(card);
+  });
+}
+
+// E. 顯示選取物件詳情 Modal
+function showPickerDetailModal(payload) {
+  setPickerActiveState(false);
+  if (!payload || !payload.url) return;
+
+  pickerTagType.textContent = payload.tag || payload.type.toUpperCase();
+  pickerUrlInput.value = payload.url;
+
+  pickerModalPreview.innerHTML = "";
+  if (payload.imgSrc) {
+    pickerModalPreview.innerHTML = `<img src="${payload.imgSrc}" alt="廣告圖檔預覽" />`;
+  } else if (payload.type === "image") {
+    pickerModalPreview.innerHTML = `<img src="${payload.url}" alt="點選提取圖檔" />`;
+  } else if (payload.type === "video") {
+    pickerModalPreview.innerHTML = `<video src="${payload.url}" controls autoplay></video>`;
+  } else if (payload.text) {
+    pickerModalPreview.innerHTML = `<div style="padding:16px; font-size:13px; color:#f8fafc; overflow-y:auto; max-height:160px; word-break:break-all;">${payload.text}</div>`;
+  } else {
+    pickerModalPreview.innerHTML = `<div style="padding:20px; color:#94a3b8;">已擷取元素鏈結內容</div>`;
+  }
+
+  pickerDetailModal.classList.add("show");
+}
+
+btnClosePickerModal.addEventListener("click", () => {
+  pickerDetailModal.classList.remove("show");
+});
+
+btnCopyPickerUrl.addEventListener("click", () => {
+  if (pickerUrlInput.value) {
+    navigator.clipboard.writeText(pickerUrlInput.value);
+    btnCopyPickerUrl.textContent = "✅ 已複製";
+    setTimeout(() => btnCopyPickerUrl.textContent = "📋 複製", 1500);
+  }
+});
+
+btnOpenPickerUrl.addEventListener("click", () => {
+  const url = pickerUrlInput.value;
+  if (url) {
+    chrome.runtime.sendMessage({ type: "ALLOW_DIRECT_ONCE", url: url }, () => {
+      window.open(url, "_blank");
+    });
+  }
+});
+
+btnDownloadPickerUrl.addEventListener("click", () => {
+  const url = pickerUrlInput.value;
+  if (url) {
+    triggerDownload(url);
+  }
+});
+
+// 通用觸發下載函式
+function triggerDownload(url) {
+  try {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = url.split("/").pop().split("?")[0] || "download";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  } catch (e) {
+    window.open(url, "_blank");
+  }
+}
 
 // 8.5 動態同步 Viewport 分頁 Title (加上 (沙盒) 尾綴) 與 Favicon
 function updateViewerTabTitleAndFavicon(title, faviconUrl) {
