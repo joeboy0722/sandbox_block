@@ -12,8 +12,17 @@
       isInsideViewerSandbox = true;
     }
   } catch (e) {
-    // 跨網域存取 window.top.location.href 拋出 security exception，代表被封裝在跨網域沙盒 iframe 內部
-    isInsideViewerSandbox = true;
+    // 跨網域存取 window.top.location.href 拋出 SecurityError 時
+    // 精準檢查祖先 Origin (ancestorOrigins) 是否源自擴充套件頁面 (chrome-extension://)，防止一般網站跨網域 iframe 誤判
+    if (window.location && window.location.ancestorOrigins) {
+      for (let i = 0; i < window.location.ancestorOrigins.length; i++) {
+        const origin = window.location.ancestorOrigins[i];
+        if (origin && origin.startsWith("chrome-extension://")) {
+          isInsideViewerSandbox = true;
+          break;
+        }
+      }
+    }
   }
 
   // 2. 若完全不在 viewer.html 沙盒視窗內（代表為普通模式/標準 Chrome 分頁開啟），直接取消 Bridge 注入！
